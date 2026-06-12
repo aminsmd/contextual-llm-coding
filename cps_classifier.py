@@ -37,11 +37,19 @@ from typing import Protocol
 
 @dataclass
 class Message:
+    """One chat message: who said it and what they said."""
+
     speaker: str
     text: str
 
 @dataclass
 class Result:
+    """Classification outcome for the message at `index`.
+
+    `votes` maps label -> count across self-consistency samples
+    (a single entry when n_samples == 1).
+    """
+
     index: int
     label: str
     dimension: str | None
@@ -51,6 +59,7 @@ class Result:
 
 
 def load_codebook(path: str | Path) -> dict:
+    """Load a codebook JSON file (see codebook_andrews_todd.json for the schema)."""
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -82,6 +91,8 @@ OUTPUT_SCHEMA = (
 
 
 def build_system_prompt(codebook: dict) -> str:
+    """Render the codebook into a system prompt: code definitions, few-shot
+    examples, and the JSON output instructions."""
     lines = [
         "You are an expert coder of Collaborative Problem Solving (CPS) chat data.",
         "You classify a single target chat message into exactly one CPS subskill "
@@ -115,6 +126,8 @@ def build_system_prompt(codebook: dict) -> str:
 def build_user_prompt(
     cognitive: list[Message], social: list[Message], target: Message
 ) -> str:
+    """Assemble the per-message user prompt: both context blocks (marked
+    reference-only) followed by the target message to classify."""
     def block(title: str, msgs: list[Message]) -> str:
         if not msgs:
             return f"## {title}\n(none)"
@@ -133,10 +146,14 @@ def build_user_prompt(
 # ------------------------------------------------------------------ providers
 
 class LLMClient(Protocol):
+    """Minimal provider interface: one completion from a system + user prompt."""
+
     def complete(self, system: str, user: str) -> str: ...
 
 
 class AnthropicClient:
+    """Anthropic Messages API backend; reads ANTHROPIC_API_KEY from the environment."""
+
     def __init__(self, model: str = "claude-sonnet-4-6", temperature: float = 0.0):
         import anthropic
 
@@ -156,6 +173,8 @@ class AnthropicClient:
 
 
 class OpenAIClient:
+    """OpenAI Chat Completions backend; reads OPENAI_API_KEY from the environment."""
+
     def __init__(self, model: str = "gpt-4o", temperature: float = 0.0):
         import openai
 
@@ -200,6 +219,7 @@ class MockClient:
 
 
 def make_client(provider: str, model: str | None = None) -> LLMClient:
+    """Build an LLMClient by provider name: "anthropic", "openai", or "mock"."""
     if provider == "anthropic":
         return AnthropicClient(**({"model": model} if model else {}))
     if provider == "openai":
@@ -212,6 +232,7 @@ def make_client(provider: str, model: str | None = None) -> LLMClient:
 # ----------------------------------------------------------------- classifier
 
 def _parse_json(text: str) -> dict:
+    """Extract and parse the first JSON object in `text` (tolerates prose around it)."""
     match = re.search(r"\{.*\}", text, re.S)
     if not match:
         raise ValueError(f"No JSON object in response: {text[:200]!r}")
@@ -219,6 +240,14 @@ def _parse_json(text: str) -> dict:
 
 
 class CPSClassifier:
+    """Codes chat messages into CPS subskills, one LLM call per message.
+
+    Each call sees the codebook (system prompt), the speaker's own recent
+    messages (cognitive context), and teammates' recent messages (social
+    context). Set n_samples > 1 for self-consistency: the message is
+    classified that many times and the majority label wins.
+    """
+
     def __init__(
         self,
         client: LLMClient,
@@ -240,6 +269,8 @@ class CPSClassifier:
         self.valid_labels = set(codebook["codes"])
 
     def _call_once(self, user_prompt: str) -> dict:
+        """One LLM call returning the parsed, label-validated response;
+        retries with linear backoff on parse or validation failure."""
         last_err: Exception | None = None
         for attempt in range(self.max_retries):
             try:
@@ -257,6 +288,7 @@ class CPSClassifier:
         raise RuntimeError(f"Classification failed after retries: {last_err}")
 
     def classify(self, messages: list[Message], t: int) -> Result:
+        """Classify the message at index t, using the prior dialogue for context."""
         cognitive, social = extract_contexts(
             messages, t, self.w_cognitive, self.w_social
         )
@@ -279,6 +311,7 @@ class CPSClassifier:
     def classify_dialogue(
         self, messages: list[Message], verbose: bool = False
     ) -> list[Result]:
+        """Classify every message in order; returns one Result per message."""
         results = []
         for t in range(len(messages)):
             res = self.classify(messages, t)
@@ -292,6 +325,7 @@ class CPSClassifier:
 # ------------------------------------------------------------------------ CLI
 
 def main() -> None:
+    """CLI entry point: code a CSV of chat messages (columns: speaker,text)."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("input_csv", help="CSV with columns: speaker,text")
     ap.add_argument("output_csv")
